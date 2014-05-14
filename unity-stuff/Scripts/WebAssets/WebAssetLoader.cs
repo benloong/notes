@@ -62,8 +62,8 @@ public class WebAssetLoader : MonoBehaviour {
 			this.url = url;
 			this.version = ver;
 			this.type = type;
-			this.onComplete = complete;
-			this.onProgress = onProgress;
+			this.onComplete += complete;
+			this.onProgress += onProgress;
 		}
 	}
 	
@@ -83,34 +83,48 @@ public class WebAssetLoader : MonoBehaviour {
 	
 	Dictionary<string, WebItem> cache = new Dictionary<string, WebItem>();
 	List<WebItemRequest> pendingList = new List<WebItemRequest>();
-	WebItemRequest request = null;
-	HashSet<string> loadingSet = new HashSet<string>();
-	WWW www;
+	List<WebItemRequest> downloadingList = new List<WebItemRequest>();
 
 #endregion
 	
-	IEnumerator Loading (WebItemRequest request) {
-		if(request == null || string.IsNullOrEmpty(request.url)) {
-			request.onComplete(false, null);
+	void OnDisable()
+	{
+		foreach(var kv in cache) {
+			kv.Value.Release();	
+		}
+		cache.Clear();
+	}
+	
+	void StartDownload()
+	{
+		if(pendingList.Count > 0) {
+			StartCoroutine(Downloading());
+		}
+	}
+	
+	
+	IEnumerator Downloading()
+	{
+		while (pendingList.Count > 0) {
+			WebItemRequest request = pendingList[0];
 			pendingList.RemoveAt(0);
-			StartDownload();
-			yield break;
+			WebItem item;
+			if(cache.TryGetValue(request.url,out item) && item.Item != null) {
+				item.AddRef();
+				if(request.onComplete != null) request.onComplete(true, item);
+				item.Release();
+			}
+			else {
+				while (downloadingList.Count >= 4) {
+					yield return null;
+				}
+				StartCoroutine(WorkerCoroutine(request));
+			}
+			yield return null;
 		}
-		
-		while(loadingSet.Contains(request.url)) {
-			yield return new WaitForSeconds(0.2f);
-		}
-		
-		WebItem item;
-		if(cache.TryGetValue(request.url,out item) && item.Item != null) {
-			item.AddRef();
-			if(request.onComplete != null) request.onComplete(true, item);
-			item.Release();
-			pendingList.RemoveAt(0);
-			StartDownload();
-			yield break;
-		}
-		
+	}
+	IEnumerator WorkerCoroutine(WebItemRequest request)
+	{
 		string filepath = GetCachePath(request.url, request.version);
 		
 		bool exists = System.IO.File.Exists(filepath);
@@ -119,31 +133,27 @@ public class WebAssetLoader : MonoBehaviour {
 			System.Uri uri = new System.Uri(filepath);
 			wwwpath = uri.AbsoluteUri;
 		}
-		if(www != null) www.Dispose();
-		using(www = new WWW(System.Uri.EscapeUriString(wwwpath))) {
-			loadingSet.Add(request.url);
+		
+		using(WWW www = new WWW(System.Uri.EscapeUriString(wwwpath))) {
+			downloadingList.Add(request);
 			float timeout = Time.realtimeSinceStartup;
 			while(!www.isDone) {
 				if(request.onProgress != null) request.onProgress(www.progress);
 				yield return null;
 				
 				if(Time.realtimeSinceStartup - timeout > 1f && www.progress == 0) {
-					loadingSet.Remove(request.url);
+					downloadingList.Remove(request);
 					if(request.onComplete != null) request.onComplete(false, null);
-					pendingList.RemoveAt(0);
-					StartDownload();
 					yield break;
 				}
 			}
-			loadingSet.Remove(request.url);
+			downloadingList.Remove(request);
 			if(www.error != null) {
 				Debug.LogWarning("cannot open url: " + wwwpath + " " + www.error);
 				if(request.onComplete != null) request.onComplete(false, null);
-				pendingList.RemoveAt(0);
-				StartDownload();
 				yield break;
 			}
-			item = new WebItem();
+			WebItem item = new WebItem();
 			item.url = request.url;
 			item.type = request.type;
 			item.version = request.version;
@@ -179,31 +189,8 @@ public class WebAssetLoader : MonoBehaviour {
 					fs.Close();
 				}
 			}
-						
-			pendingList.RemoveAt(0);
-			StartDownload();
-		}
-		yield break;
-	}
-	
-	void OnDisable()
-	{
-		foreach(var kv in cache) {
-			kv.Value.Release();	
-		}
-		cache.Clear();
-		loadingSet.Clear();
-	}
-	
-	void StartDownload()
-	{
-		if(pendingList.Count > 0) {
-			request = pendingList[0];
-			StartCoroutine(Loading(request));
 		}
 	}
-
-
 	#region public interface
 	
 	public void RequestWebAsset(string url, int version, System.Type type,
@@ -211,12 +198,20 @@ public class WebAssetLoader : MonoBehaviour {
 		System.Action<float> onprogress = null)
 	{
 		for (int i = 0; i < pendingList.Count; i++) {
-			if(pendingList[i].url.Equals(url)) {
+			if(pendingList[i].url.Equals(url) && pendingList[i].version == version) {
 				pendingList[i].onComplete += onfinish;
 				pendingList[i].onProgress += onprogress;
 				return;
 			}
 		}
+		for (int i = 0; i < downloadingList.Count; i++) {
+			if(downloadingList[i].url.Equals(url)&& downloadingList[i].version == version) {
+				downloadingList[i].onComplete += onfinish;
+				downloadingList[i].onProgress += onprogress;
+				return;
+			}
+		}
+		
 		WebItemRequest request = new WebItemRequest(url, version, type, onfinish, onprogress);
 		bool needrestart = pendingList.Count == 0;
 		pendingList.Add(request);
@@ -235,20 +230,21 @@ public class WebAssetLoader : MonoBehaviour {
 //		Debug.Log("Cancel Request" + url);
 		if(string.IsNullOrEmpty(url)) return;
 		if(pendingList.Count == 0 )return;
-//		if(url.Equals(pendingList[0].url)) {
-////			StopAllCoroutines();
-//			pendingList.RemoveAt(0);
-//			StartDownload();
-//		}
-//		else {
-			for (int i = 0; i < pendingList.Count; i++) {
-				if(pendingList[i].url.Equals(url)) {
-					pendingList[i].onComplete -= onfinish;
-					pendingList[i].onProgress -= onprogress;
-//					pendingList.RemoveAt(i);
-//					i--;
-				}
+		
+		for (int i = 0; i < pendingList.Count; i++) {
+			if(pendingList[i].url.Equals(url)) {
+				pendingList[i].onComplete -= onfinish;
+				pendingList[i].onProgress -= onprogress;
 			}
+		}
+		
+		for (int i = 0; i < downloadingList.Count; i++) {
+			if(downloadingList[i].url.Equals(url))
+			{
+				downloadingList[i].onComplete -= onfinish;
+				downloadingList[i].onProgress -= onprogress;
+			}
+		}
 //		}
 		
 #if UNITY_EDITOR
@@ -282,6 +278,7 @@ public class WebAssetLoader : MonoBehaviour {
 		}
 		return "";
     }
+	
 	static string GetCachePath(string url, int version)
 	{
 		string path = System.IO.Path.Combine(Application.temporaryCachePath,"webcache");
@@ -292,7 +289,7 @@ public class WebAssetLoader : MonoBehaviour {
 		return System.IO.Path.Combine(path, version.ToString("x"));
 	}
 	
-	static bool IsVersionCached(string url, int version)
+	public static bool IsVersionCached(string url, int version)
 	{
 		return System.IO.File.Exists(GetCachePath(url, version));
 	}
