@@ -303,8 +303,10 @@ namespace Net {
 		{
 			try {
 				Socket socket = result.AsyncState as Socket;
-				socket.EndReceive(result);
-				
+				int recvLen = socket.EndReceive(result);
+				if(recvLen == 0) {
+					throw new SocketException(10054);
+				}
 				packetSize = PacketHelper.UnpackHeader(header);
 				buffer = new byte[packetSize];
 				socket.BeginReceive(buffer, 0, packetSize, SocketFlags.None, OnRecievePacket, socket);
